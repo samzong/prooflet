@@ -1,6 +1,6 @@
 {
-  "name": "@prooflet/sdk",
-  "version": "0.0.0",
+  "name": "prooflet",
+  "version": "0.1.0",
   "description": "The proof layer for prototypes.",
   "type": "module",
   "license": "MIT",
@@ -13,6 +13,9 @@
     "README.md",
     "LICENSE"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -28,7 +31,7 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "tsc -p tsconfig.build.json",
-    "prepare": "pnpm build",
+    "pack:check": "pnpm build && npm pack --dry-run",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "verify": "pnpm typecheck && pnpm test && pnpm build"

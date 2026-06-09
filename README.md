@@ -23,20 +23,22 @@ Prooflet keeps the explanation beside the thing being explained. A prooflet is a
 
 ## Install
 
+```bash
+pnpm add prooflet
+```
+
 ```ts
-import { prooflet } from "@prooflet/sdk"
+import { prooflet } from "prooflet"
 
 prooflet.mount({
   projectId: "dify-prototype",
 })
 ```
 
-The package is not published yet. This is the intended API direction, not a released contract.
-
 For auto mounting:
 
 ```ts
-import "@prooflet/sdk/auto"
+import "prooflet/auto"
 ```
 
 ## Principles

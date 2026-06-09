@@ -84,7 +84,7 @@ V1 must not provide:
 Package target:
 
 ```txt
-@prooflet/sdk
+prooflet
 ```
 
 Runtime target:
