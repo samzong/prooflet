@@ -43,7 +43,7 @@ import "prooflet/auto"
 
 ## Principles
 
-1. SDK first, product later.
+1. Runtime first, dashboard later.
 2. Annotation content must not live inside host application code.
 3. The host app should not need framework-specific integration.
 4. Local-first behavior must be useful before cloud sync exists.
@@ -79,6 +79,7 @@ V1 does not include:
 pnpm install
 pnpm dev
 pnpm verify
+pnpm pack:check
 ```
 
 The demo runs at:
@@ -87,7 +88,7 @@ The demo runs at:
 http://127.0.0.1:5173/
 ```
 
-`pnpm verify` runs typecheck, tests, and package build.
+`pnpm verify` runs typecheck, tests, and package build. `pnpm pack:check` previews the npm package contents before publishing.
 
 See [docs/SPEC.md](docs/SPEC.md).
 

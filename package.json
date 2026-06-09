@@ -5,6 +5,14 @@
   "type": "module",
   "license": "MIT",
   "private": false,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/samzong/prooflet.git"
+  },
+  "bugs": {
+    "url": "https://github.com/samzong/prooflet/issues"
+  },
+  "homepage": "https://github.com/samzong/prooflet#readme",
   "sideEffects": [
     "./dist/auto.js"
   ],

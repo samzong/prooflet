@@ -118,7 +118,7 @@ declare const prooflet: {
 }
 ```
 
-This is the initial intended API, not a frozen release contract.
+This is the 0.x API surface. Keep it small and avoid breaking host imports without a versioned release.
 
 ## Runtime Modules
 
@@ -275,7 +275,7 @@ Prooflet V1 is real only when:
 4. A normal UI edit can make an anchor weak or stale, and Prooflet shows that state.
 5. Removing Prooflet from the host app removes the overlay without leaving application code changes behind.
 
-This list is the V1 acceptance bar, not proof that the current repository has cleared it. The in-repository Vite demo validates the SDK authoring loop, but it is not evidence for the unrelated-project import or Dify Prototype dogfood requirements.
+This list is the V1 acceptance bar. The published npm package validates the package import path, and the in-repository Vite demo validates the authoring loop. Dify Prototype dogfood should still be recorded separately before calling V1 complete.
 
 ## Implementation Bias
 
