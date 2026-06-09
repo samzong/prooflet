@@ -226,7 +226,7 @@ Default V1 key:
 prooflet:v1:<projectId>
 ```
 
-V1 stores data per browser profile and origin. This is intentional. Cross-device use is a paid cloud-sync direction, not a V1 requirement.
+V1 stores data per browser profile and origin. This is intentional. Cross-device use is a future hosted-sync direction, not a V1 requirement.
 
 Stored data should avoid sensitive values. The picker must not store input values from password fields or secret-like controls.
 
@@ -247,11 +247,11 @@ Keyboard expectations:
 - click outside editor: close editor if there are no dirty changes.
 - selected target remains highlighted while editing.
 
-## Commercial Path
+## Future Collaboration Path
 
 The open local SDK proves adoption.
 
-Paid value can later come from:
+Future hosted value can later come from:
 
 - cloud sync
 - cross-device storage
@@ -263,7 +263,7 @@ Paid value can later come from:
 - prototype review sessions
 - hosted storage for agencies and product teams
 
-Do not build paid cloud features into V1. Keep V1 good enough that a product manager can install it in one prototype and immediately use it alone.
+Do not build hosted collaboration features into V1. Keep V1 good enough that a product manager can install it in one prototype and immediately use it alone.
 
 ## First Acceptance Test
 

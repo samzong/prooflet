@@ -47,7 +47,7 @@ import "@prooflet/sdk/auto"
 4. Local-first behavior must be useful before cloud sync exists.
 5. Anchors must be resilient enough to survive normal prototype edits.
 6. The overlay must be visually isolated from the host app.
-7. Commercial value comes from portability, review flow, and sync, not from locking up local notes.
+7. Long-term value comes from portability, review flow, and sync, not from locking up local notes.
 
 ## V1 Boundary
 
