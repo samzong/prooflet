@@ -1,0 +1,48 @@
+{
+  "name": "@prooflet/sdk",
+  "version": "0.0.0",
+  "description": "The proof layer for prototypes.",
+  "type": "module",
+  "license": "MIT",
+  "private": false,
+  "sideEffects": [
+    "./dist/auto.js"
+  ],
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./auto": {
+      "types": "./dist/auto.d.ts",
+      "import": "./dist/auto.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "verify": "pnpm typecheck && pnpm test && pnpm build"
+  },
+  "keywords": [
+    "prototype",
+    "annotation",
+    "sdk",
+    "overlay",
+    "prooflet"
+  ],
+  "devDependencies": {
+    "jsdom": "^26.1.0",
+    "typescript": "^5.8.3",
+    "vite": "^6.3.5",
+    "vitest": "^3.2.4"
+  }
+}
