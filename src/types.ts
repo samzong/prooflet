@@ -43,6 +43,9 @@ export type ProofletAnchor = {
     dataTestId?: string
     ariaLabel?: string
     role?: string
+    name?: string
+    placeholder?: string
+    inputType?: string
   }
   text?: {
     exact?: string

@@ -17,6 +17,9 @@ export function createAnchor(element: Element): ProofletAnchor {
       dataTestId: readFirstAttribute(element, testIdAttributes),
       ariaLabel: readFirstAttribute(element, ["aria-label"]),
       role: readFirstAttribute(element, ["role"]),
+      name: readFirstAttribute(element, ["name"]),
+      placeholder: readFirstAttribute(element, ["placeholder"]),
+      inputType: readFirstAttribute(element, ["type"]),
     },
     text: text
       ? {
@@ -59,7 +62,7 @@ export function resolveAnchor(anchor: ProofletAnchor): ResolvedAnchor {
     }
   }
 
-  if (!best || best.score < 24) {
+  if (!best || best.score < 24 || !hasIdentityMatch(anchor, best.element)) {
     return {
       health: "stale",
       element: null,
@@ -105,6 +108,8 @@ function collectCandidates(anchor: ProofletAnchor): Element[] {
   }
   addCandidate(selectors.ariaLabel ? document.querySelector(`[aria-label="${escapeAttribute(selectors.ariaLabel)}"]`) : null, candidates)
   addCandidate(selectors.role ? document.querySelector(`[role="${escapeAttribute(selectors.role)}"]`) : null, candidates)
+  addCandidate(selectors.name ? document.querySelector(`[name="${escapeAttribute(selectors.name)}"]`) : null, candidates)
+  addCandidate(selectors.placeholder ? document.querySelector(`[placeholder="${escapeAttribute(selectors.placeholder)}"]`) : null, candidates)
   addCandidate(selectors.css ? safeQuerySelector(selectors.css) : null, candidates)
   addCandidate(findByChildIndexPath(anchor.fingerprint.childIndexPath), candidates)
 
@@ -141,6 +146,18 @@ function scoreElement(anchor: ProofletAnchor, element: Element): number {
     score += 12
   }
 
+  if (selectors.name && element.getAttribute("name") === selectors.name) {
+    score += 20
+  }
+
+  if (selectors.placeholder && element.getAttribute("placeholder") === selectors.placeholder) {
+    score += 18
+  }
+
+  if (selectors.inputType && element.getAttribute("type") === selectors.inputType) {
+    score += 8
+  }
+
   if (element.tagName.toLowerCase() === anchor.fingerprint.tagName) {
     score += 12
   }
@@ -168,6 +185,22 @@ function scoreElement(anchor: ProofletAnchor, element: Element): number {
   }
 
   return score
+}
+
+function hasIdentityMatch(anchor: ProofletAnchor, element: Element): boolean {
+  const selectors = anchor.selectors
+  const text = normalizeText(element.textContent ?? "")
+
+  return Boolean(
+    (selectors.dataTestId && readFirstAttribute(element, testIdAttributes) === selectors.dataTestId) ||
+      (selectors.ariaLabel && element.getAttribute("aria-label") === selectors.ariaLabel) ||
+      (selectors.role && element.getAttribute("role") === selectors.role) ||
+      (selectors.name && element.getAttribute("name") === selectors.name) ||
+      (selectors.placeholder && element.getAttribute("placeholder") === selectors.placeholder) ||
+      (selectors.inputType && element.getAttribute("type") === selectors.inputType) ||
+      (anchor.text?.exact && text === anchor.text.exact) ||
+      (anchor.text?.prefix && text.includes(anchor.text.prefix)),
+  )
 }
 
 function buildCssSelector(element: Element): string {
@@ -254,17 +287,7 @@ function addCandidate(element: Element | null, candidates: Set<Element>): void {
 }
 
 function isResolvableElement(element: Element): boolean {
-  if (!element.isConnected) {
-    return false
-  }
-
-  if (element === document.documentElement || element === document.body) {
-    return false
-  }
-
-  const tagName = element.tagName
-
-  return tagName !== "SCRIPT" && tagName !== "STYLE" && tagName !== "META" && tagName !== "LINK"
+  return element.isConnected && isSelectableElement(element)
 }
 
 function safeQuerySelector(selector: string): Element | null {
