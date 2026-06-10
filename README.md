@@ -41,6 +41,66 @@ For auto mounting:
 import "prooflet/auto"
 ```
 
+## How it fits your prototype
+
+Prooflet is a runtime layer, not a framework integration. The host imports
+one line; everything else stays on Prooflet's side of the boundary.
+
+```mermaid
+flowchart LR
+    subgraph host["Host prototype - any framework"]
+        app["App code<br/>zero changes"]
+        dom["Live DOM"]
+    end
+
+    subgraph runtime["Prooflet runtime - isolated in a shadow root"]
+        ctrl["Controller<br/>single state owner"]
+        anchor["Anchor engine<br/>multi-signal, conservative"]
+        ui["Overlay<br/>pins / viewer / editor / dock"]
+    end
+
+    store[("localStorage<br/>prooflet:v1:projectId")]
+
+    app == "the only touchpoint:<br/>prooflet.mount({ projectId })" ==> ctrl
+    ctrl --> anchor
+    ctrl --> ui
+    anchor -- "read-only resolution:<br/>resolved / weak / stale" --> dom
+    ui -. "renders above the prototype,<br/>never touches host styles or events" .-> dom
+    ctrl -- "annotations stay in the browser,<br/>never in host source code" --> store
+```
+
+- **One import in, one delete out.** No component changes, no framework
+  adapters, no build config. Removing the import removes every trace.
+- **Hard isolation.** All Prooflet UI lives in a shadow root. The host DOM is
+  only read for anchor resolution, never modified or restyled.
+- **Conservative anchors.** Annotations survive normal prototype edits as
+  `resolved` or `weak`; if the target disappears they degrade to a
+  recoverable `stale` card - never a wrong bind.
+
+What a review session looks like:
+
+```mermaid
+sequenceDiagram
+    actor U as Reviewer / PM
+    participant P as Prooflet
+    participant H as Host DOM
+
+    Note over U,H: Annotate once
+    U->>P: Annotate - enter pick mode
+    U->>H: Click an element
+    P->>P: Capture multi-signal anchor,<br/>write narration, save locally
+
+    Note over U,H: Revisit - after refresh or prototype edits
+    P->>H: Re-resolve anchors against the live DOM
+    alt Target still recognizable
+        P-->>U: Pin re-attaches in place (resolved / weak)
+    else Target gone
+        P-->>U: Recoverable stale card - never a wrong bind
+    end
+```
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the runtime internals.
+
 ## Principles
 
 1. Runtime first, dashboard later.
@@ -90,7 +150,9 @@ http://127.0.0.1:5173/
 
 `pnpm verify` runs typecheck, tests, and package build. `pnpm pack:check` previews the npm package contents before publishing.
 
-See [docs/SPEC.md](docs/SPEC.md).
+See [docs/SPEC.md](docs/SPEC.md) for the product specification,
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the runtime architecture,
+and [docs/MAINTENANCE.md](docs/MAINTENANCE.md) for the change rules.
 
 ## License
 

@@ -1,420 +1,530 @@
 import type { ProofletDraft, ProofletRecord, ResolvedAnchor } from "./types.js"
 
-type OverlayCallbacks = {
-  onEnterEditMode(): void
-  onExitEditMode(): void
-  onSaveDraft(draft: ProofletDraft): void
-  onUpdateProoflet(id: string, draft: ProofletDraft): void
-  onDeleteProoflet(id: string): void
-  onCancelEditor(): void
+export type OverlayItem = {
+  record: ProofletRecord
+  resolved: ResolvedAnchor
 }
 
-type RenderState = {
+export type OverlayEditorSession = {
+  key: number
+  mode: "create" | "edit"
+  recordId: string | null
+  initialTitle: string
+  initialBody: string
+}
+
+export type OverlayState = {
   enabled: boolean
   editMode: boolean
-  prooflets: Array<{
-    record: ProofletRecord
-    resolved: ResolvedAnchor
-  }>
-  selectedTarget: Element | null
+  items: OverlayItem[]
+  proofletsVisible: boolean
+  storageHealthy: boolean
   hoveredTarget: Element | null
+  selectedTarget: Element | null
+  viewerId: string | null
+  editor: OverlayEditorSession | null
+}
+
+export type OverlayIntents = {
+  onEnterEditMode(): void
+  onExitEditMode(): void
+  onToggleVisibility(): void
+  onPinHover(id: string): void
+  onPinLeave(): void
+  onPinActivate(id: string): void
+  onViewerHover(): void
+  onViewerLeave(): void
+  onCloseViewer(): void
+  onEditRecord(id: string): void
+  onDeleteRecord(id: string): void
+  onSubmitEditor(draft: ProofletDraft): void
+  onCancelEditor(): void
 }
 
 export type Overlay = {
   host: HTMLElement
   mount(): void
   unmount(): void
-  render(state: RenderState): void
-  openCreateEditor(): void
-  openEditEditor(record: ProofletRecord): void
-  closeEditor(): void
+  update(state: OverlayState): void
+  reposition(): void
 }
 
-export function createOverlay(callbacks: OverlayCallbacks): Overlay {
-  const host = document.createElement("div")
-  const shadow = host.attachShadow({ mode: "open" })
-  let state: RenderState | null = null
-  let draftOpen = false
-  let editingProoflet: ProofletRecord | null = null
-  let hoveredProofletId: string | null = null
-  let lockedProofletId: string | null = null
-  let hoverCloseTimer: ReturnType<typeof window.setTimeout> | null = null
-  let proofletsVisible = true
+const VIEWER_WIDTH = 320
+const VIEWER_HEIGHT = 190
+const VIEWER_GAP = 12
+const VIEWER_MARGIN = 12
 
+/**
+ * The overlay is a stateless view. It owns DOM nodes inside a closed-world
+ * shadow root and emits intents; it never decides what the runtime state is.
+ *
+ * Rendering is split in two paths:
+ * - update(state): structural sync, called only when state actually changes.
+ * - reposition(): geometry-only style writes, safe to call on every scroll.
+ *
+ * The editor form is created once per editor session and never rebuilt while
+ * the session is open, so unsaved input survives scroll/resize/re-renders.
+ */
+export function createOverlay(intents: OverlayIntents): Overlay {
+  const host = document.createElement("div")
   host.id = "prooflet-root"
   host.setAttribute("data-prooflet-root", "")
+  const shadow = host.attachShadow({ mode: "open" })
+
+  const style = document.createElement("style")
+  style.textContent = styles
+  const root = createDiv("root")
+  const layer = createDiv("layer")
+  const hoverBox = createDiv("hover-box")
+  const selectedBox = createDiv("selected-box")
+  const dock = createDiv("dock")
+  hoverBox.style.display = "none"
+  selectedBox.style.display = "none"
+  layer.append(hoverBox, selectedBox)
+  root.append(layer, dock)
+  shadow.append(style, root)
+
+  let pinEntries: Array<{ button: HTMLButtonElement; element: Element }> = []
+  let hoveredTarget: Element | null = null
+  let selectedTarget: Element | null = null
+  let viewer: HTMLElement | null = null
+  let viewerTarget: Element | null = null
+  let scrim: HTMLElement | null = null
+  let editorForm: HTMLFormElement | null = null
+  let editorSession: OverlayEditorSession | null = null
+  let lastPins: { items: OverlayItem[]; visible: boolean } | null = null
+  let lastDock: { items: OverlayItem[]; editMode: boolean; visible: boolean; storageHealthy: boolean } | null = null
+  let lastViewer: { items: OverlayItem[]; viewerId: string | null } | null = null
+
+  shadow.addEventListener("click", handleDelegatedClick)
 
   function mount(): void {
     document.documentElement.appendChild(host)
   }
 
   function unmount(): void {
-    document.removeEventListener("keydown", handleEditorKeydown, true)
     host.remove()
   }
 
-  function render(nextState: RenderState): void {
-    state = nextState
-    shadow.innerHTML = buildMarkup(nextState, draftOpen, lockedProofletId ?? hoveredProofletId, proofletsVisible, editingProoflet)
-    bindEvents()
-  }
+  function update(state: OverlayState): void {
+    root.className = `root ${state.enabled ? "is-enabled" : "is-disabled"}${state.editMode ? " is-editing" : ""}`
 
-  function openCreateEditor(): void {
-    draftOpen = true
-    editingProoflet = null
-    clearActiveProoflet()
-
-    if (state) {
-      render(state)
-    }
-  }
-
-  function openEditEditor(record: ProofletRecord): void {
-    draftOpen = true
-    editingProoflet = record
-    clearActiveProoflet()
-
-    if (state) {
-      render(state)
-    }
-  }
-
-  function closeEditor(): void {
-    draftOpen = false
-    editingProoflet = null
-    callbacks.onCancelEditor()
-
-    if (state) {
-      render(state)
-    }
-  }
-
-  function clearHoverCloseTimer(): void {
-    if (hoverCloseTimer) {
-      window.clearTimeout(hoverCloseTimer)
-      hoverCloseTimer = null
-    }
-  }
-
-  function clearActiveProoflet(): void {
-    clearHoverCloseTimer()
-    hoveredProofletId = null
-    lockedProofletId = null
-  }
-
-  function scheduleHoverClose(): void {
-    if (lockedProofletId) {
+    if (!state.enabled) {
+      clearPins()
+      removeViewer()
+      removeEditor()
+      dock.innerHTML = ""
+      hoveredTarget = null
+      selectedTarget = null
+      lastDock = null
+      lastViewer = null
+      reposition()
       return
     }
 
-    clearHoverCloseTimer()
-    hoverCloseTimer = window.setTimeout(() => {
-      hoverCloseTimer = null
-      hoveredProofletId = null
-
-      if (state) {
-        render(state)
-      }
-    }, 160)
+    syncPins(state)
+    syncDock(state)
+    syncViewer(state)
+    syncEditor(state)
+    hoveredTarget = state.hoveredTarget
+    selectedTarget = state.selectedTarget
+    reposition()
   }
 
-  function handleEditorKeydown(event: KeyboardEvent): void {
-    if (event.key !== "Escape" || !shadow.querySelector("[data-prooflet-editor]")) {
+  function reposition(): void {
+    for (const entry of pinEntries) {
+      if (!entry.element.isConnected) {
+        entry.button.style.display = "none"
+        continue
+      }
+
+      const rect = entry.element.getBoundingClientRect()
+
+      if (entry.button.style.display !== "") {
+        entry.button.style.display = ""
+      }
+
+      setPosition(entry.button, Math.round(rect.right - 12), Math.round(rect.top - 12))
+    }
+
+    positionBox(hoverBox, hoveredTarget)
+    positionBox(selectedBox, selectedTarget)
+    positionViewer()
+  }
+
+  function syncPins(state: OverlayState): void {
+    if (lastPins && lastPins.items === state.items && lastPins.visible === state.proofletsVisible) {
       return
     }
 
-    event.preventDefault()
-    event.stopPropagation()
-    closeEditor()
+    clearPins()
+    const items = state.proofletsVisible ? state.items : []
+    let index = 0
+
+    for (const item of items) {
+      index += 1
+      const element = item.resolved.element
+
+      if (!element) {
+        continue
+      }
+
+      const button = document.createElement("button")
+      button.type = "button"
+      button.className = `pin pin-${item.resolved.health}`
+      button.dataset.proofletId = item.record.id
+      button.dataset.action = "view"
+      button.setAttribute("aria-label", item.record.title || "Prooflet")
+      button.textContent = String(index)
+      button.addEventListener("mouseenter", () => intents.onPinHover(item.record.id))
+      button.addEventListener("mouseleave", () => intents.onPinLeave())
+      layer.append(button)
+      pinEntries.push({ button, element })
+    }
+
+    lastPins = { items: state.items, visible: state.proofletsVisible }
   }
 
-  function bindEvents(): void {
-    document.removeEventListener("keydown", handleEditorKeydown, true)
-
-    if (shadow.querySelector("[data-prooflet-editor]")) {
-      document.addEventListener("keydown", handleEditorKeydown, true)
+  function clearPins(): void {
+    for (const entry of pinEntries) {
+      entry.button.remove()
     }
 
-    shadow.querySelector<HTMLButtonElement>("[data-action='enter-edit']")?.addEventListener("click", callbacks.onEnterEditMode)
-    shadow.querySelector<HTMLButtonElement>("[data-action='exit-edit']")?.addEventListener("click", callbacks.onExitEditMode)
-    shadow.querySelector<HTMLButtonElement>("[data-action='cancel-editor']")?.addEventListener("click", closeEditor)
-    shadow.querySelector<HTMLElement>(".scrim")?.addEventListener("click", (event) => {
-      if (event.target === event.currentTarget && !isEditorDirty()) {
-        closeEditor()
+    pinEntries = []
+    lastPins = null
+  }
+
+  function syncDock(state: OverlayState): void {
+    if (
+      lastDock &&
+      lastDock.items === state.items &&
+      lastDock.editMode === state.editMode &&
+      lastDock.visible === state.proofletsVisible &&
+      lastDock.storageHealthy === state.storageHealthy
+    ) {
+      return
+    }
+
+    const count = state.items.length
+    const staleItems = state.proofletsVisible ? state.items.filter((item) => item.resolved.health === "stale") : []
+
+    dock.innerHTML = `
+      <div class="brand">
+        <span class="mark"></span>
+        <span>Prooflet</span>
+        ${count ? `<span class="count">${count}</span>` : ""}
+      </div>
+      <div class="actions">
+        ${
+          state.editMode
+            ? `<button type="button" class="primary" data-action="exit-edit">Done</button>`
+            : `<button type="button" class="primary" data-action="enter-edit">Annotate</button>`
+        }
+        ${count ? `<button type="button" class="secondary" data-action="toggle-visibility">${state.proofletsVisible ? "Hide" : "Show"}</button>` : ""}
+      </div>
+      ${state.storageHealthy ? "" : `<div class="storage-note">Local storage is unavailable. Changes stay in memory only.</div>`}
+      ${
+        staleItems.length
+          ? `<div class="stale-list">${staleItems
+              .map(
+                (item) => `
+                  <div class="stale-item">
+                    <div class="stale-head">
+                      <span class="health health-stale">stale</span>
+                      <strong>${escapeHtml(item.record.title || "Untitled")}</strong>
+                    </div>
+                    <p>${escapeHtml(item.record.body || "No narration yet.")}</p>
+                    <span>Target not found on this page.</span>
+                    <div class="stale-actions">
+                      <button type="button" class="secondary" data-prooflet-id="${escapeHtml(item.record.id)}" data-action="edit">Edit</button>
+                      <button type="button" class="danger" data-prooflet-id="${escapeHtml(item.record.id)}" data-action="delete">Delete</button>
+                    </div>
+                  </div>
+                `,
+              )
+              .join("")}</div>`
+          : ""
       }
-    })
-    shadow.querySelector<HTMLButtonElement>("[data-action='toggle-visibility']")?.addEventListener("click", () => {
-      proofletsVisible = !proofletsVisible
-      clearActiveProoflet()
+    `
 
-      if (state) {
-        render(state)
-      }
-    })
+    lastDock = {
+      items: state.items,
+      editMode: state.editMode,
+      visible: state.proofletsVisible,
+      storageHealthy: state.storageHealthy,
+    }
+  }
 
-    for (const button of shadow.querySelectorAll<HTMLButtonElement>("[data-prooflet-id][data-action='edit']")) {
-      button.addEventListener("click", () => {
-        const id = button.dataset.proofletId
-        const record = state?.prooflets.find((item) => item.record.id === id)?.record
-
-        if (record) {
-          openEditEditor(record)
-        }
-      })
+  function syncViewer(state: OverlayState): void {
+    if (lastViewer && lastViewer.items === state.items && lastViewer.viewerId === state.viewerId && (viewer !== null) === Boolean(state.viewerId)) {
+      return
     }
 
-    for (const button of shadow.querySelectorAll<HTMLButtonElement>("[data-prooflet-id][data-action='view']")) {
-      button.addEventListener("mouseenter", () => {
-        if (lockedProofletId) {
-          return
-        }
+    const item = state.viewerId && state.proofletsVisible ? state.items.find((entry) => entry.record.id === state.viewerId) : null
+    const target = item?.resolved.element ?? null
 
-        clearHoverCloseTimer()
-        hoveredProofletId = button.dataset.proofletId ?? null
-
-        if (state) {
-          render(state)
-        }
-      })
-      button.addEventListener("mouseleave", scheduleHoverClose)
-      button.addEventListener("click", () => {
-        clearHoverCloseTimer()
-        lockedProofletId = button.dataset.proofletId ?? null
-        hoveredProofletId = null
-
-        if (state) {
-          render(state)
-        }
-      })
+    if (!item || !target) {
+      removeViewer()
+      lastViewer = { items: state.items, viewerId: state.viewerId }
+      return
     }
 
-    shadow.querySelector<HTMLElement>(".viewer")?.addEventListener("mouseenter", clearHoverCloseTimer)
-    shadow.querySelector<HTMLElement>(".viewer")?.addEventListener("mouseleave", scheduleHoverClose)
-    shadow.querySelector<HTMLButtonElement>("[data-action='close-viewer']")?.addEventListener("click", () => {
-      clearActiveProoflet()
-
-      if (state) {
-        render(state)
-      }
-    })
-
-    for (const button of shadow.querySelectorAll<HTMLButtonElement>("[data-prooflet-id][data-action='delete']")) {
-      button.addEventListener("click", () => {
-        const id = button.dataset.proofletId
-
-        if (id) {
-          clearActiveProoflet()
-          callbacks.onDeleteProoflet(id)
-        }
-      })
+    if (!viewer) {
+      viewer = document.createElement("section")
+      viewer.className = "viewer"
+      viewer.addEventListener("mouseenter", () => intents.onViewerHover())
+      viewer.addEventListener("mouseleave", () => intents.onViewerLeave())
+      root.append(viewer)
     }
 
-    shadow.querySelector<HTMLFormElement>("[data-prooflet-editor]")?.addEventListener("submit", (event) => {
+    viewerTarget = target
+    viewer.innerHTML = `
+      <div class="viewer-head">
+        <button type="button" class="icon-button" data-action="close-viewer" aria-label="Close prooflet">×</button>
+      </div>
+      <h2>${escapeHtml(item.record.title || "Untitled prooflet")}</h2>
+      <p>${escapeHtml(item.record.body || "No narration yet.")}</p>
+      <div class="viewer-actions">
+        <button type="button" class="primary" data-prooflet-id="${escapeHtml(item.record.id)}" data-action="edit">Edit</button>
+        <button type="button" class="danger" data-prooflet-id="${escapeHtml(item.record.id)}" data-action="delete">Delete</button>
+      </div>
+    `
+    lastViewer = { items: state.items, viewerId: state.viewerId }
+  }
+
+  function removeViewer(): void {
+    viewer?.remove()
+    viewer = null
+    viewerTarget = null
+  }
+
+  function syncEditor(state: OverlayState): void {
+    const session = state.editor
+
+    if (!session) {
+      removeEditor()
+      return
+    }
+
+    if (editorSession && editorSession.key === session.key && editorForm) {
+      return
+    }
+
+    removeEditor()
+    editorSession = session
+    scrim = createDiv("scrim")
+    const form = document.createElement("form")
+    form.className = "editor"
+    form.setAttribute("data-prooflet-editor", "")
+    form.innerHTML = `
+      <div class="editor-head">
+        <strong>${session.mode === "edit" ? "Edit prooflet" : "New prooflet"}</strong>
+        <button type="button" class="icon-button" data-action="cancel-editor" aria-label="Close editor">×</button>
+      </div>
+      <label>
+        <span>Title</span>
+        <input name="title" placeholder="What should reviewers notice?" />
+      </label>
+      <label>
+        <span>Narration</span>
+        <textarea name="body" rows="6" placeholder="Explain the product intent, expected behavior, or caveat."></textarea>
+      </label>
+      <div class="editor-actions">
+        ${session.recordId ? `<button type="button" class="danger" data-prooflet-id="${escapeHtml(session.recordId)}" data-action="delete">Delete</button>` : ""}
+        <span></span>
+        <button type="submit" class="primary">Save</button>
+      </div>
+    `
+
+    const title = form.querySelector<HTMLInputElement>("input[name='title']")!
+    const body = form.querySelector<HTMLTextAreaElement>("textarea[name='body']")!
+    title.value = session.initialTitle
+    body.value = session.initialBody
+    form.addEventListener("submit", (event) => {
       event.preventDefault()
+      const draft: ProofletDraft = { title: title.value.trim(), body: body.value.trim() }
 
-      const form = event.currentTarget as HTMLFormElement
-      const formData = new FormData(form)
-      const title = String(formData.get("title") ?? "").trim()
-      const body = String(formData.get("body") ?? "").trim()
-
-      if (!title && !body) {
+      if (!draft.title && !draft.body) {
         return
       }
 
-      draftOpen = false
-
-      const currentEditingProoflet = editingProoflet
-      editingProoflet = null
-
-      if (currentEditingProoflet) {
-        callbacks.onUpdateProoflet(currentEditingProoflet.id, { title, body })
-      } else {
-        callbacks.onSaveDraft({ title, body })
-      }
+      intents.onSubmitEditor(draft)
     })
+
+    editorForm = form
+    scrim.append(form)
+    root.append(scrim)
+    title.focus()
+  }
+
+  function removeEditor(): void {
+    scrim?.remove()
+    scrim = null
+    editorForm = null
+    editorSession = null
   }
 
   function isEditorDirty(): boolean {
-    const form = shadow.querySelector<HTMLFormElement>("[data-prooflet-editor]")
-
-    if (!form) {
+    if (!editorForm || !editorSession) {
       return false
     }
 
-    const formData = new FormData(form)
-    const title = String(formData.get("title") ?? "")
-    const body = String(formData.get("body") ?? "")
+    const title = editorForm.querySelector<HTMLInputElement>("input[name='title']")?.value ?? ""
+    const body = editorForm.querySelector<HTMLTextAreaElement>("textarea[name='body']")?.value ?? ""
 
-    return title !== (editingProoflet?.title ?? "") || body !== (editingProoflet?.body ?? "")
+    return title !== editorSession.initialTitle || body !== editorSession.initialBody
+  }
+
+  function handleDelegatedClick(event: Event): void {
+    const target = event.target instanceof Element ? event.target : null
+
+    if (!target) {
+      return
+    }
+
+    if (scrim && target === scrim) {
+      if (!isEditorDirty()) {
+        intents.onCancelEditor()
+      }
+
+      return
+    }
+
+    const actionElement = target.closest<HTMLElement>("[data-action]")
+
+    if (!actionElement) {
+      return
+    }
+
+    const id = actionElement.dataset.proofletId ?? null
+
+    switch (actionElement.dataset.action) {
+      case "enter-edit":
+        intents.onEnterEditMode()
+        break
+      case "exit-edit":
+        intents.onExitEditMode()
+        break
+      case "toggle-visibility":
+        intents.onToggleVisibility()
+        break
+      case "view":
+        if (id) intents.onPinActivate(id)
+        break
+      case "close-viewer":
+        intents.onCloseViewer()
+        break
+      case "edit":
+        if (id) intents.onEditRecord(id)
+        break
+      case "delete":
+        if (id) intents.onDeleteRecord(id)
+        break
+      case "cancel-editor":
+        intents.onCancelEditor()
+        break
+    }
+  }
+
+  function positionBox(box: HTMLElement, target: Element | null): void {
+    if (!target || !target.isConnected) {
+      if (box.style.display !== "none") {
+        box.style.display = "none"
+      }
+
+      return
+    }
+
+    const rect = target.getBoundingClientRect()
+
+    if (box.style.display !== "") {
+      box.style.display = ""
+    }
+
+    setPosition(box, Math.round(rect.left), Math.round(rect.top))
+    setStyleLength(box, "width", Math.round(rect.width))
+    setStyleLength(box, "height", Math.round(rect.height))
+  }
+
+  function positionViewer(): void {
+    if (!viewer || !viewerTarget || !viewerTarget.isConnected) {
+      return
+    }
+
+    const rect = viewerTarget.getBoundingClientRect()
+    // Measured size, not design constants: CSS caps the viewer at
+    // min(320px, 100vw - 32px) and height follows content. jsdom has no
+    // layout and reports 0, hence the constant fallbacks.
+    const width = viewer.offsetWidth || VIEWER_WIDTH
+    const height = viewer.offsetHeight || VIEWER_HEIGHT
+    const vv = window.visualViewport
+    const viewportWidth = (vv ? vv.width * vv.scale : 0) || window.innerWidth || document.documentElement.clientWidth || width
+    const viewportHeight = (vv ? vv.height * vv.scale : 0) || window.innerHeight || document.documentElement.clientHeight || height
+    const maxLeft = Math.max(VIEWER_MARGIN, viewportWidth - width - VIEWER_MARGIN)
+    const maxTop = Math.max(VIEWER_MARGIN, viewportHeight - height - VIEWER_MARGIN)
+
+    // Placement ladder: beside the target (right, then left); when a reflow
+    // makes the target span the viewport - the normal responsive case after
+    // a display-ratio change - fall through to below, then above, hanging
+    // off the pin corner. Only a viewport too small for any slot degrades to
+    // a clamped overlap. The viewer must always stay visually attached to
+    // its pin, never park at a far-away margin.
+    const rightLeft = rect.right + VIEWER_GAP
+    const leftLeft = rect.left - width - VIEWER_GAP
+    const belowTop = rect.bottom + VIEWER_GAP
+    const aboveTop = rect.top - height - VIEWER_GAP
+    let left: number
+    let top: number
+
+    if (rightLeft <= maxLeft) {
+      left = rightLeft
+      top = clamp(rect.top, VIEWER_MARGIN, maxTop)
+    } else if (leftLeft >= VIEWER_MARGIN) {
+      left = leftLeft
+      top = clamp(rect.top, VIEWER_MARGIN, maxTop)
+    } else if (belowTop <= maxTop) {
+      left = clamp(rect.right - width, VIEWER_MARGIN, maxLeft)
+      top = belowTop
+    } else if (aboveTop >= VIEWER_MARGIN) {
+      left = clamp(rect.right - width, VIEWER_MARGIN, maxLeft)
+      top = aboveTop
+    } else {
+      left = clamp(rightLeft, VIEWER_MARGIN, maxLeft)
+      top = clamp(rect.top, VIEWER_MARGIN, maxTop)
+    }
+
+    setPosition(viewer, left, top)
   }
 
   return {
     host,
     mount,
     unmount,
-    render,
-    openCreateEditor,
-    openEditEditor,
-    closeEditor,
+    update,
+    reposition,
   }
 }
 
-function buildMarkup(
-  state: RenderState,
-  draftOpen: boolean,
-  activeProofletId: string | null,
-  proofletsVisible: boolean,
-  editingProoflet: ProofletRecord | null,
-): string {
-  if (!state.enabled) {
-    return `
-      <style>${styles}</style>
-      <div class="root is-disabled"></div>
-    `
+function createDiv(className: string): HTMLDivElement {
+  const element = document.createElement("div")
+  element.className = className
+  return element
+}
+
+// Geometry runs every animation frame in real browsers; only touch the
+// style object when a value actually changed so steady frames stay free of
+// style invalidation.
+function setPosition(element: HTMLElement, left: number, top: number): void {
+  setStyleLength(element, "left", Math.round(left))
+  setStyleLength(element, "top", Math.round(top))
+}
+
+function setStyleLength(element: HTMLElement, property: "left" | "top" | "width" | "height", value: number): void {
+  const next = `${value}px`
+
+  if (element.style[property] !== next) {
+    element.style[property] = next
   }
-
-  const activeProoflets = state.prooflets.filter((item) => item.record.status !== "hidden")
-  const visibleProoflets = proofletsVisible ? activeProoflets : []
-  const activeItem = visibleProoflets.find((item) => item.record.id === activeProofletId)
-  const anchoredActiveItem = activeItem?.resolved.element ? activeItem : null
-  const pins = visibleProoflets
-    .map((item, index) => {
-      if (!item.resolved.element) {
-        return ""
-      }
-
-      const rect = item.resolved.element.getBoundingClientRect()
-      const health = item.resolved.health
-
-      return `
-        <button class="pin pin-${health}" style="left:${Math.round(rect.right - 12)}px;top:${Math.round(rect.top - 12)}px" data-prooflet-id="${escapeHtml(item.record.id)}" data-action="view" aria-label="${escapeHtml(item.record.title || "Prooflet")}">
-          ${index + 1}
-        </button>
-      `
-    })
-    .join("")
-  const hoverBox = state.hoveredTarget ? targetBox(state.hoveredTarget, "hover-box") : ""
-  const selectedBox = state.selectedTarget ? targetBox(state.selectedTarget, "selected-box") : ""
-  const staleList = visibleProoflets.filter((item) => item.resolved.health === "stale")
-  const showEditor = draftOpen || Boolean(editingProoflet)
-
-  return `
-    <style>${styles}</style>
-    <div class="root ${state.enabled ? "is-enabled" : "is-disabled"} ${state.editMode ? "is-editing" : ""}">
-      <div class="layer">
-        ${pins}
-        ${hoverBox}
-        ${selectedBox}
-      </div>
-      ${
-        anchoredActiveItem
-          ? `
-            <section class="viewer" style="${viewerStyle(anchoredActiveItem.resolved.element!)}">
-              <div class="viewer-head">
-                <button type="button" class="icon-button" data-action="close-viewer" aria-label="Close prooflet">×</button>
-              </div>
-              <h2>${escapeHtml(anchoredActiveItem.record.title || "Untitled prooflet")}</h2>
-              <p>${escapeHtml(anchoredActiveItem.record.body || "No narration yet.")}</p>
-              <div class="viewer-actions">
-                <button type="button" class="primary" data-prooflet-id="${escapeHtml(anchoredActiveItem.record.id)}" data-action="edit">Edit</button>
-                <button type="button" class="danger" data-prooflet-id="${escapeHtml(anchoredActiveItem.record.id)}" data-action="delete">Delete</button>
-              </div>
-            </section>
-          `
-          : ""
-      }
-      <div class="dock">
-        <div class="brand">
-          <span class="mark"></span>
-          <span>Prooflet</span>
-          ${activeProoflets.length ? `<span class="count">${activeProoflets.length}</span>` : ""}
-        </div>
-        <div class="actions">
-          ${
-            state.editMode
-              ? `<button type="button" class="primary" data-action="exit-edit">Done</button>`
-              : `<button type="button" class="primary" data-action="enter-edit">Annotate</button>`
-          }
-          ${
-            activeProoflets.length
-              ? `<button type="button" class="secondary" data-action="toggle-visibility">${proofletsVisible ? "Hide" : "Show"}</button>`
-              : ""
-          }
-        </div>
-        ${
-          staleList.length
-            ? `<div class="stale-list">${staleList
-                .map(
-                  (item) => `
-                    <div class="stale-item">
-                      <div class="stale-head">
-                        <span class="health health-stale">stale</span>
-                        <strong>${escapeHtml(item.record.title || "Untitled")}</strong>
-                      </div>
-                      <p>${escapeHtml(item.record.body || "No narration yet.")}</p>
-                      <span>Target not found on this page.</span>
-                      <div class="stale-actions">
-                        <button type="button" class="secondary" data-prooflet-id="${escapeHtml(item.record.id)}" data-action="edit">Edit</button>
-                        <button type="button" class="danger" data-prooflet-id="${escapeHtml(item.record.id)}" data-action="delete">Delete</button>
-                      </div>
-                    </div>
-                  `,
-                )
-                .join("")}</div>`
-            : ""
-        }
-      </div>
-      ${
-        showEditor
-          ? `
-            <div class="scrim">
-              <form class="editor" data-prooflet-editor>
-                <div class="editor-head">
-                  <strong>${editingProoflet ? "Edit prooflet" : "New prooflet"}</strong>
-                  <button type="button" class="icon-button" data-action="cancel-editor" aria-label="Close editor">×</button>
-                </div>
-                <label>
-                  <span>Title</span>
-                  <input name="title" value="${escapeHtml(editingProoflet?.title ?? "")}" placeholder="What should reviewers notice?" autofocus />
-                </label>
-                <label>
-                  <span>Narration</span>
-                  <textarea name="body" rows="6" placeholder="Explain the product intent, expected behavior, or caveat.">${escapeHtml(editingProoflet?.body ?? "")}</textarea>
-                </label>
-                <div class="editor-actions">
-                  ${editingProoflet ? `<button type="button" class="danger" data-prooflet-id="${escapeHtml(editingProoflet.id)}" data-action="delete">Delete</button>` : ""}
-                  <span></span>
-                  <button type="submit" class="primary">Save</button>
-                </div>
-              </form>
-            </div>
-          `
-          : ""
-      }
-    </div>
-  `
-}
-
-function targetBox(element: Element, className: string): string {
-  const rect = element.getBoundingClientRect()
-
-  return `<div class="${className}" style="left:${Math.round(rect.left)}px;top:${Math.round(rect.top)}px;width:${Math.round(rect.width)}px;height:${Math.round(rect.height)}px"></div>`
-}
-
-function viewerStyle(element: Element): string {
-  const rect = element.getBoundingClientRect()
-  const width = 320
-  const height = 190
-  const gap = 12
-  const margin = 12
-  const viewportWidth = window.innerWidth || document.documentElement.clientWidth || width
-  const viewportHeight = window.innerHeight || document.documentElement.clientHeight || height
-  const rightSideLeft = rect.right + gap
-  const leftSideLeft = rect.left - width - gap
-  const left = rightSideLeft + width <= viewportWidth - margin ? rightSideLeft : Math.max(margin, leftSideLeft)
-  const top = clamp(rect.top, margin, viewportHeight - height - margin)
-
-  return `left:${Math.round(left)}px;top:${Math.round(top)}px`
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -458,6 +568,9 @@ const styles = `
 * {
   box-sizing: border-box;
 }
+[hidden] {
+  display: none !important;
+}
 button,
 input,
 textarea {
@@ -470,6 +583,9 @@ button {
   position: fixed;
   inset: 0;
   pointer-events: none;
+}
+.root.is-disabled .dock {
+  display: none;
 }
 .layer {
   position: absolute;
@@ -584,7 +700,6 @@ button {
 .primary:hover {
   background: var(--prooflet-accent-hover);
 }
-.secondary,
 .secondary {
   background: rgba(255, 255, 255, 0.95);
   color: var(--prooflet-text-secondary);
@@ -601,6 +716,16 @@ button {
 .danger:hover {
   background: #fef3f2;
   border-color: rgba(240, 68, 56, 0.25);
+}
+.storage-note {
+  margin-top: 8px;
+  border: 0.5px solid rgba(240, 68, 56, 0.25);
+  border-radius: 8px;
+  background: #fef3f2;
+  color: #d92d20;
+  padding: 7px 8px;
+  font-size: 12px;
+  line-height: 1.4;
 }
 .stale-list {
   display: grid;
@@ -726,8 +851,7 @@ button {
   padding: 16px;
   backdrop-filter: blur(12px);
 }
-.editor-head,
-.editor-actions {
+.editor-head {
   display: grid;
   grid-template-columns: 1fr auto;
   align-items: center;

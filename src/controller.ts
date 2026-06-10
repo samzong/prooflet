@@ -1,8 +1,40 @@
 import { createAnchor, isSelectableElement, resolveAnchor } from "./anchor.js"
-import { createOverlay, type Overlay } from "./overlay.js"
-import { createStore } from "./storage.js"
-import type { ProofletConfig, ProofletController, ProofletDraft, ProofletRecord } from "./types.js"
+import { createOverlay, type Overlay, type OverlayItem } from "./overlay.js"
+import { createStore, type ProofletStore } from "./storage.js"
+import type { ProofletAnchor, ProofletConfig, ProofletController, ProofletDraft, ProofletRecord, ResolvedAnchor } from "./types.js"
 
+const HOVER_CLOSE_DELAY_MS = 160
+const MUTATION_DEBOUNCE_MS = 150
+
+type EditorState = {
+  key: number
+  mode: "create" | "edit"
+  recordId: string | null
+  target: Element | null
+  // Captured at selection time. Saving a new prooflet must never depend on
+  // the live element: a host re-render can detach the target while the user
+  // is typing, and the draft still has to land as a weak/stale record.
+  anchor: ProofletAnchor | null
+  initialTitle: string
+  initialBody: string
+}
+
+type ViewerState = {
+  id: string
+  pinned: boolean
+}
+
+/**
+ * The controller is the single owner of runtime state. The overlay is a
+ * stateless view; storage is a dumb document store; the anchor module is a
+ * pure resolver. Every state change flows through push() or refresh().
+ *
+ * Two update paths keep the host cheap to live in:
+ * - refresh(): re-resolve all anchors against the live DOM, then push.
+ *   Runs on data changes, resize, and debounced host DOM mutations.
+ * - push(): re-render from cached resolutions. Runs on UI-only changes.
+ * - scroll never re-resolves or rebuilds DOM; it only repositions geometry.
+ */
 export function createController(config: ProofletConfig): ProofletController {
   assertBrowser()
   assertConfig(config)
@@ -10,10 +42,21 @@ export function createController(config: ProofletConfig): ProofletController {
   let mounted = false
   let enabled = config.enabled ?? true
   let editMode = false
+  let records: ProofletRecord[] = []
+  let items: OverlayItem[] = []
+  let resolutions = new Map<string, ResolvedAnchor>()
   let hoveredTarget: Element | null = null
-  let selectedTarget: Element | null = null
-  let documentProoflets: ProofletRecord[] = []
-  let store: ReturnType<typeof createStore>
+  let editor: EditorState | null = null
+  let viewer: ViewerState | null = null
+  let proofletsVisible = true
+  let storageHealthy = true
+  let editorKeySequence = 0
+  let hoverCloseTimer: ReturnType<typeof window.setTimeout> | null = null
+  let mutationTimer: ReturnType<typeof window.setTimeout> | null = null
+  let keydownBound = false
+  let observer: MutationObserver | null = null
+  let geometryFrame: number | null = null
+  let store: ProofletStore
   let overlay: Overlay
 
   function mount(): void {
@@ -22,20 +65,58 @@ export function createController(config: ProofletConfig): ProofletController {
     }
 
     store = createStore(config.projectId, config.storageKey)
-    documentProoflets = store.load().prooflets
+    records = store.load().prooflets
     overlay = createOverlay({
       onEnterEditMode: enterEditMode,
       onExitEditMode: exitEditMode,
-      onSaveDraft: saveDraft,
-      onUpdateProoflet: updateProoflet,
-      onDeleteProoflet: deleteProoflet,
-      onCancelEditor: cancelEditor,
+      onToggleVisibility: toggleVisibility,
+      onPinHover: hoverPin,
+      onPinLeave: scheduleViewerClose,
+      onPinActivate: activatePin,
+      onViewerHover: clearHoverCloseTimer,
+      onViewerLeave: scheduleViewerClose,
+      onCloseViewer: closeViewer,
+      onEditRecord: editRecord,
+      onDeleteRecord: deleteRecord,
+      onSubmitEditor: submitEditor,
+      onCancelEditor: closeEditor,
     })
     overlay.mount()
     mounted = true
-    window.addEventListener("resize", render)
-    window.addEventListener("scroll", render, true)
-    render()
+    window.addEventListener("resize", handleResize)
+    window.addEventListener("scroll", handleScroll, true)
+    observer = new MutationObserver(scheduleMutationRefresh)
+    observer.observe(document.documentElement, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      characterData: true,
+    })
+    startGeometryLoop()
+    refresh()
+  }
+
+  // Layout can change without any catchable event: display-scale switches,
+  // media-query reflows, CSS transitions, font and image loads. Events are
+  // only used for anchor re-resolution; geometry is observed directly every
+  // frame and converges within one frame no matter what moved the page.
+  // Writes are diffed in the overlay, so steady frames cost a few rect reads.
+  function startGeometryLoop(): void {
+    if (typeof window.requestAnimationFrame !== "function") {
+      return
+    }
+
+    const tick = (): void => {
+      if (!mounted) {
+        geometryFrame = null
+        return
+      }
+
+      overlay.reposition()
+      geometryFrame = window.requestAnimationFrame(tick)
+    }
+
+    geometryFrame = window.requestAnimationFrame(tick)
   }
 
   function unmount(): void {
@@ -43,9 +124,27 @@ export function createController(config: ProofletConfig): ProofletController {
       return
     }
 
-    exitEditMode()
-    window.removeEventListener("resize", render)
-    window.removeEventListener("scroll", render, true)
+    observer?.disconnect()
+    observer = null
+
+    if (geometryFrame !== null) {
+      window.cancelAnimationFrame(geometryFrame)
+      geometryFrame = null
+    }
+
+    clearHoverCloseTimer()
+
+    if (mutationTimer !== null) {
+      window.clearTimeout(mutationTimer)
+      mutationTimer = null
+    }
+
+    editor = null
+    viewer = null
+    exitEditModeInternal()
+    syncKeydownListener()
+    window.removeEventListener("resize", handleResize)
+    window.removeEventListener("scroll", handleScroll, true)
     overlay.unmount()
     mounted = false
   }
@@ -58,8 +157,8 @@ export function createController(config: ProofletConfig): ProofletController {
     editMode = true
     document.addEventListener("mousemove", handlePointerMove, true)
     document.addEventListener("click", handleDocumentClick, true)
-    document.addEventListener("keydown", handleKeydown, true)
-    render()
+    syncKeydownListener()
+    push()
   }
 
   function exitEditMode(): void {
@@ -67,123 +166,268 @@ export function createController(config: ProofletConfig): ProofletController {
       return
     }
 
+    exitEditModeInternal()
+    syncKeydownListener()
+    push()
+  }
+
+  function exitEditModeInternal(): void {
+    if (!editMode) {
+      return
+    }
+
     editMode = false
     hoveredTarget = null
-    selectedTarget = null
     document.removeEventListener("mousemove", handlePointerMove, true)
     document.removeEventListener("click", handleDocumentClick, true)
-    document.removeEventListener("keydown", handleKeydown, true)
-    render()
   }
 
   function setEnabled(nextEnabled: boolean): void {
     enabled = nextEnabled
 
     if (!enabled) {
-      exitEditMode()
+      exitEditModeInternal()
+      editor = null
+      viewer = null
+      clearHoverCloseTimer()
+      syncKeydownListener()
     }
 
-    render()
+    refresh()
+  }
+
+  function handleResize(): void {
+    refresh()
+  }
+
+  function handleScroll(): void {
+    if (mounted) {
+      overlay.reposition()
+    }
+  }
+
+  function scheduleMutationRefresh(): void {
+    // Mutation callbacks are async: they can arrive after the environment is
+    // torn down or after the host removed our root node. Never act on a page
+    // we are no longer rendered into.
+    if (typeof window === "undefined" || !mounted || mutationTimer !== null || !overlay.host.isConnected) {
+      return
+    }
+
+    mutationTimer = window.setTimeout(() => {
+      mutationTimer = null
+      refresh()
+    }, MUTATION_DEBOUNCE_MS)
   }
 
   function handlePointerMove(event: MouseEvent): void {
-    if (!enabled || !editMode || selectedTarget) {
+    if (!enabled || !editMode || editor) {
       return
     }
 
     const target = event.target instanceof Element ? event.target : null
     hoveredTarget = target && isSelectableElement(target, overlay.host) ? target : null
-    render()
+    push()
   }
 
   function handleDocumentClick(event: MouseEvent): void {
-    if (!enabled || !editMode || selectedTarget || !hoveredTarget) {
+    if (!enabled || !editMode || editor || !hoveredTarget) {
       return
     }
 
     event.preventDefault()
     event.stopPropagation()
-    const existing = findExistingProofletForTarget(hoveredTarget)
-    selectedTarget = existing?.resolved.element ?? hoveredTarget
-    hoveredTarget = null
+    const existing = findExistingForTarget(hoveredTarget)
 
     if (existing) {
-      overlay.openEditEditor(existing.record)
+      openEditor("edit", existing.record, existing.resolved.element)
     } else {
-      overlay.openCreateEditor()
+      openEditor("create", null, hoveredTarget)
     }
-
-    render()
   }
 
   function handleKeydown(event: KeyboardEvent): void {
-    if (event.key === "Escape") {
-      event.preventDefault()
+    if (event.key !== "Escape") {
+      return
+    }
 
-      if (selectedTarget) {
-        overlay.closeEditor()
-      } else {
-        exitEditMode()
-      }
+    if (editor) {
+      event.preventDefault()
+      event.stopPropagation()
+      closeEditor()
+      return
+    }
+
+    if (editMode) {
+      event.preventDefault()
+      exitEditMode()
     }
   }
 
-  function saveDraft(draft: ProofletDraft): void {
-    if (!selectedTarget) {
+  function syncKeydownListener(): void {
+    const shouldBind = mounted && (editMode || editor !== null)
+
+    if (shouldBind && !keydownBound) {
+      document.addEventListener("keydown", handleKeydown, true)
+      keydownBound = true
+    } else if (!shouldBind && keydownBound) {
+      document.removeEventListener("keydown", handleKeydown, true)
+      keydownBound = false
+    }
+  }
+
+  function openEditor(mode: "create" | "edit", record: ProofletRecord | null, target: Element | null): void {
+    editorKeySequence += 1
+    editor = {
+      key: editorKeySequence,
+      mode,
+      recordId: record?.id ?? null,
+      target,
+      anchor: mode === "create" && target ? createAnchor(target) : null,
+      initialTitle: record?.title ?? "",
+      initialBody: record?.body ?? "",
+    }
+    hoveredTarget = null
+    viewer = null
+    clearHoverCloseTimer()
+    syncKeydownListener()
+    push()
+  }
+
+  function closeEditor(): void {
+    if (!editor) {
+      return
+    }
+
+    editor = null
+    hoveredTarget = null
+    syncKeydownListener()
+    push()
+  }
+
+  function submitEditor(draft: ProofletDraft): void {
+    if (!editor) {
       return
     }
 
     const now = new Date().toISOString()
-    const next: ProofletRecord = {
-      id: createId(),
-      status: "active",
-      anchor: createAnchor(selectedTarget),
-      title: draft.title,
-      body: draft.body,
-      placement: "auto",
-      tags: [],
-      createdAt: now,
-      updatedAt: now,
+
+    if (editor.mode === "edit" && editor.recordId) {
+      const recordId = editor.recordId
+      setRecords(
+        records.map((record) =>
+          record.id === recordId
+            ? {
+                ...record,
+                title: draft.title,
+                body: draft.body,
+                updatedAt: now,
+              }
+            : record,
+        ),
+      )
+    } else if (editor.anchor) {
+      setRecords([
+        ...records,
+        {
+          id: createId(),
+          anchor: editor.anchor,
+          title: draft.title,
+          body: draft.body,
+          createdAt: now,
+          updatedAt: now,
+        },
+      ])
     }
 
-    documentProoflets = store.replace([...documentProoflets, next]).prooflets
-    cancelEditor()
+    editor = null
+    hoveredTarget = null
+    syncKeydownListener()
+    refresh()
   }
 
-  function updateProoflet(id: string, draft: ProofletDraft): void {
-    const now = new Date().toISOString()
-    documentProoflets = store.replace(
-      documentProoflets.map((prooflet) =>
-        prooflet.id === id
-          ? {
-              ...prooflet,
-              title: draft.title,
-              body: draft.body,
-              updatedAt: now,
-            }
-          : prooflet,
-        ),
-    ).prooflets
-    cancelEditor()
+  function editRecord(id: string): void {
+    const record = records.find((entry) => entry.id === id)
+
+    if (!record) {
+      return
+    }
+
+    openEditor("edit", record, resolutions.get(id)?.element ?? null)
   }
 
-  function deleteProoflet(id: string): void {
-    documentProoflets = store.replace(documentProoflets.filter((prooflet) => prooflet.id !== id)).prooflets
-    cancelEditor()
+  function deleteRecord(id: string): void {
+    if (viewer?.id === id) {
+      viewer = null
+      clearHoverCloseTimer()
+    }
+
+    if (editor?.recordId === id) {
+      editor = null
+      syncKeydownListener()
+    }
+
+    setRecords(records.filter((record) => record.id !== id))
+    refresh()
   }
 
-  function findExistingProofletForTarget(target: Element): { record: ProofletRecord; resolved: ReturnType<typeof resolveAnchor> } | null {
-    let match: { record: ProofletRecord; resolved: ReturnType<typeof resolveAnchor> } | null = null
+  function toggleVisibility(): void {
+    proofletsVisible = !proofletsVisible
+    viewer = null
+    clearHoverCloseTimer()
+    push()
+  }
 
-    for (const record of documentProoflets) {
-      if (record.status === "hidden") {
-        continue
-      }
+  function hoverPin(id: string): void {
+    if (viewer?.pinned) {
+      return
+    }
 
-      const resolved = resolveAnchor(record.anchor)
-      const element = resolved.element
+    clearHoverCloseTimer()
+    viewer = { id, pinned: false }
+    push()
+  }
 
-      if (!element || (element !== target && !element.contains(target))) {
+  function activatePin(id: string): void {
+    clearHoverCloseTimer()
+    viewer = { id, pinned: true }
+    push()
+  }
+
+  function closeViewer(): void {
+    clearHoverCloseTimer()
+    viewer = null
+    push()
+  }
+
+  function scheduleViewerClose(): void {
+    if (!viewer || viewer.pinned) {
+      return
+    }
+
+    clearHoverCloseTimer()
+    hoverCloseTimer = window.setTimeout(() => {
+      hoverCloseTimer = null
+      viewer = null
+      push()
+    }, HOVER_CLOSE_DELAY_MS)
+  }
+
+  function clearHoverCloseTimer(): void {
+    if (hoverCloseTimer !== null) {
+      window.clearTimeout(hoverCloseTimer)
+      hoverCloseTimer = null
+    }
+  }
+
+  function findExistingForTarget(target: Element): { record: ProofletRecord; resolved: ResolvedAnchor } | null {
+    let match: { record: ProofletRecord; resolved: ResolvedAnchor } | null = null
+
+    for (const record of records) {
+      const resolved = resolutions.get(record.id)
+      const element = resolved?.element
+
+      if (!resolved || !element || (element !== target && !element.contains(target))) {
         continue
       }
 
@@ -195,33 +439,40 @@ export function createController(config: ProofletConfig): ProofletController {
     return match
   }
 
-  function cancelEditor(): void {
-    selectedTarget = null
-    hoveredTarget = null
-    render()
+  function setRecords(next: ProofletRecord[]): void {
+    const result = store.replace(next)
+    storageHealthy = result.persisted
+    records = result.document.prooflets
   }
 
-  function render(): void {
+  function refresh(): void {
     if (!mounted) {
       return
     }
 
-    overlay.render({
+    resolutions = new Map(records.map((record) => [record.id, safeResolve(record.anchor)]))
+    items = records.map((record) => ({
+      record,
+      resolved: resolutions.get(record.id) ?? { health: "stale", element: null, confidence: 0 },
+    }))
+    push()
+  }
+
+  function push(): void {
+    if (!mounted) {
+      return
+    }
+
+    overlay.update({
       enabled,
       editMode,
-      selectedTarget,
+      items,
+      proofletsVisible,
+      storageHealthy,
       hoveredTarget,
-      prooflets: documentProoflets.map((record) => {
-        const resolved = resolveAnchor(record.anchor)
-
-        return {
-          record: {
-            ...record,
-            status: resolved.health === "stale" ? "stale" : record.status === "stale" ? "active" : record.status,
-          },
-          resolved,
-        }
-      }),
+      selectedTarget: editor?.target ?? null,
+      viewerId: viewer?.id ?? null,
+      editor,
     })
   }
 
@@ -231,6 +482,16 @@ export function createController(config: ProofletConfig): ProofletController {
     enterEditMode,
     exitEditMode,
     setEnabled,
+  }
+}
+
+// Containment boundary: a single broken anchor must degrade to "stale",
+// never break the whole overlay or the host page.
+function safeResolve(anchor: ProofletRecord["anchor"]): ResolvedAnchor {
+  try {
+    return resolveAnchor(anchor)
+  } catch {
+    return { health: "stale", element: null, confidence: 0 }
   }
 }
 

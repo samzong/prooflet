@@ -103,13 +103,13 @@ function collectCandidates(anchor: ProofletAnchor): Element[] {
 
   if (selectors.dataTestId) {
     for (const attribute of testIdAttributes) {
-      addCandidate(document.querySelector(`[${attribute}="${escapeAttribute(selectors.dataTestId)}"]`), candidates)
+      addCandidate(queryByAttribute(attribute, selectors.dataTestId), candidates)
     }
   }
-  addCandidate(selectors.ariaLabel ? document.querySelector(`[aria-label="${escapeAttribute(selectors.ariaLabel)}"]`) : null, candidates)
-  addCandidate(selectors.role ? document.querySelector(`[role="${escapeAttribute(selectors.role)}"]`) : null, candidates)
-  addCandidate(selectors.name ? document.querySelector(`[name="${escapeAttribute(selectors.name)}"]`) : null, candidates)
-  addCandidate(selectors.placeholder ? document.querySelector(`[placeholder="${escapeAttribute(selectors.placeholder)}"]`) : null, candidates)
+  addCandidate(selectors.ariaLabel ? queryByAttribute("aria-label", selectors.ariaLabel) : null, candidates)
+  addCandidate(selectors.role ? queryByAttribute("role", selectors.role) : null, candidates)
+  addCandidate(selectors.name ? queryByAttribute("name", selectors.name) : null, candidates)
+  addCandidate(selectors.placeholder ? queryByAttribute("placeholder", selectors.placeholder) : null, candidates)
   addCandidate(selectors.css ? safeQuerySelector(selectors.css) : null, candidates)
   addCandidate(findByChildIndexPath(anchor.fingerprint.childIndexPath), candidates)
 
@@ -288,6 +288,12 @@ function addCandidate(element: Element | null, candidates: Set<Element>): void {
 
 function isResolvableElement(element: Element): boolean {
   return element.isConnected && isSelectableElement(element)
+}
+
+// Host attribute values are arbitrary user content. Never let a weird value
+// turn into a thrown selector-syntax error inside the render path.
+function queryByAttribute(name: string, value: string): Element | null {
+  return safeQuerySelector(`[${name}="${escapeAttribute(value)}"]`)
 }
 
 function safeQuerySelector(selector: string): Element | null {

@@ -21,14 +21,15 @@ export type ProofletDocument = {
   prooflets: ProofletRecord[]
 }
 
+/**
+ * The persisted record holds only authored facts. Anchor health is derived
+ * at render time from live DOM resolution and must never be persisted.
+ */
 export type ProofletRecord = {
   id: string
-  status: "active" | "hidden" | "stale"
   anchor: ProofletAnchor
   title: string
   body: string
-  placement: "auto" | "top" | "right" | "bottom" | "left"
-  tags: string[]
   createdAt: string
   updatedAt: string
 }
