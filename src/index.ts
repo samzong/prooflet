@@ -1,19 +1,16 @@
 import { createController } from "./controller.js"
 import type { ProofletConfig, ProofletController } from "./types.js"
 
+// Public surface: the mount API plus the types a host can rely on (config,
+// controller, and the persisted schema). Internal modules (anchor, storage,
+// overlay, controller) are implementation detail and must not be re-exported.
 export type {
-  AnchorHealth,
   ProofletAnchor,
   ProofletConfig,
   ProofletController,
   ProofletDocument,
-  ProofletDraft,
   ProofletRecord,
-  ResolvedAnchor,
 } from "./types.js"
-
-export { createAnchor, resolveAnchor } from "./anchor.js"
-export { createStore } from "./storage.js"
 
 export const prooflet = {
   mount(config: ProofletConfig): ProofletController {

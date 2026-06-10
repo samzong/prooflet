@@ -160,12 +160,9 @@ type ProofletDocument = {
 
 type ProofletRecord = {
   id: string
-  status: "active" | "hidden" | "stale"
   anchor: ProofletAnchor
   title: string
   body: string
-  placement: "auto" | "top" | "right" | "bottom" | "left"
-  tags: string[]
   createdAt: string
   updatedAt: string
 }
@@ -180,6 +177,9 @@ type ProofletAnchor = {
     dataTestId?: string
     ariaLabel?: string
     role?: string
+    name?: string
+    placeholder?: string
+    inputType?: string
   }
   text?: {
     exact?: string
@@ -201,6 +201,8 @@ type ProofletAnchor = {
 ```
 
 The anchor must never rely on a single CSS selector. Selector, text, role, geometry, and structural fingerprint should all contribute to matching confidence.
+
+The record persists only authored facts. Anchor health is derived at render time and never stored. Loaders must sanitize stored documents: ignore unknown fields, drop malformed records, and fill missing optional fields.
 
 ## Anchor Health
 
